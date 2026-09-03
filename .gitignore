@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.idea/
+mydataset/
+
+# 模型/数据/训练产物（大文件不入库）
+yolo_demo/models/
+yolo_demo/runs/
+yolo_demo/dataset_small/
+yolo_demo/data/
+yolo_demo/*.pt
+yolo_demo/*.task
+yolov8n.pt
+yolo_demo/yolov8n-cls.pt
+
+# 临时/体积大
+*.mp4
+*.zip
+pageData_*.json
