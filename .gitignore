@@ -18,3 +18,7 @@ yolo_demo/yolov8n-cls.pt
 *.mp4
 *.zip
 pageData_*.json
+
+# private config (contains API key, do not commit)
+yolo_demo/pinyin/config.py
+*.env
