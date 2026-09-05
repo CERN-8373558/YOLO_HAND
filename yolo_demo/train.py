@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="yolov8n-cls.pt", help="预训练分类模型权重")
     parser.add_argument("--lr", type=float, default=0.01, help="学习率")
     parser.add_argument("--patience", type=int, default=20, help="早停轮数，防止过拟合")
+    parser.add_argument("--name", type=str, default="asl_demo", help="输出实验名(runs/classify/<name>)")
     return parser.parse_args()
 
 
@@ -65,10 +66,10 @@ def main():
         patience=args.patience,
         device="cpu",
         project="runs/classify",
-        name="asl_demo",
+        name=args.name,
     )
 
-    print("\n训练完成！模型保存在 runs/classify/asl_demo/weights/best.pt")
+    print(f"\n训练完成！模型保存在 runs/classify/{args.name}/weights/best.pt")
 
 
 if __name__ == "__main__":

@@ -100,6 +100,8 @@ def camera_main(args):
     pending = []            # 当前拼音串（累积中）
     current_cls = None
     stable_count = 0
+    stable_energy = 0.0     # 同字母累积置信度能量（>=STABLE 且帧数够 → 确认）
+    confirmed_letter = None # 已确认的字母：同字母持续期间不再重复确认，换字母/放手才解锁
     last_hand_time = time.time()   # 上次检测到手的时间
     candidates = []         # 本地候选列表（第1行）
     llm_cands = []          # 大模型候选列表（第2行，自动追加）
@@ -174,24 +176,46 @@ def camera_main(args):
             if r.get("moving"):
                 current_cls = None
                 stable_count = 0
+                stable_energy = 0.0
+                confirmed_letter = None
             elif r["conf"] >= args.conf:
                 letter = r["letter"].lower()
                 if letter in "abcdefghijklmnopqrstuvwxyz":
                     if letter != current_cls:
+                        # 换字母 → 重新开始能量累积
                         current_cls = letter
                         stable_count = 1
+                        stable_energy = r["conf"]
+                        # 换字母会解锁：该字母可能后续需要再确认
+                        if confirmed_letter != letter:
+                            confirmed_letter = None
                     else:
                         stable_count += 1
-                        if stable_count == args.stable:
-                            # 字母确认 → 若在补全状态先取消候选
-                            candidates = []
-                            if letter not in "".join(pending[-3:]):  # 防连打重复
-                                pending.append(letter)
-                            pending_text = "".join(pending)
+                        stable_energy += r["conf"]
+                        # 已确认过且未换字母 → 不重复确认（锁）
+                        if confirmed_letter != letter:
+                            energy_need = args.stable * 0.9
+                            if stable_count >= args.stable and stable_energy >= energy_need:
+                                # 字母确认 → 若在补全状态先取消候选
+                                candidates = []
+                                if letter not in "".join(pending[-3:]):  # 防连打重复
+                                    pending.append(letter)
+                                pending_text = "".join(pending)
+                                confirmed_letter = letter   # 加锁：同字母不再重复
+                                stable_energy = 0.0
         else:
-            # 手放下：重置字母级状态
+            # 手放下：重置字母级状态（解锁，允许下次重新确认同字母）
             current_cls = None
             stable_count = 0
+            stable_energy = 0.0
+            confirmed_letter = None
+
+        # 进度条填充比例 0~1：同字母稳定帧数/目标帧数 × 平均置信度加权
+        progress = 0.0
+        if current_cls and stable_count > 0:
+            avg_conf = stable_energy / stable_count
+            frame_ratio = stable_count / args.stable
+            progress = min(1.0, max(0.0, (frame_ratio * 0.6 + avg_conf * 0.4) * frame_ratio))
 
         # ---- 收手停顿触发补全 ----
         if pending and not r["detected"]:
@@ -277,6 +301,16 @@ def camera_main(args):
             label = f"{r['letter']} {r['conf']:.0%}"
             cv2.putText(frame, label, (x1, max(0, y1 - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
+            # 框下方进度条：显示字母确认程度，满格(黄)即成功累积
+            bar_w = max(60, x2 - x1)
+            bar_h = 8
+            bx1, by1 = x1, min(frame_h - bar_h - 4, y2 + 6)
+            bx2, by2 = x1 + bar_w, by1 + bar_h
+            cv2.rectangle(frame, (bx1, by1), (bx2, by2), (80, 80, 80), -1)
+            fill_w = int(bar_w * min(1.0, progress))
+            if fill_w > 0:
+                col = (0, 200, 255) if progress >= 1.0 else (0, 255, 0)
+                cv2.rectangle(frame, (bx1, by1), (bx1 + fill_w, by2), col, -1)
 
         cv2.imshow("ASL Agent Input", frame)
 

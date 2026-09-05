@@ -22,3 +22,9 @@ pageData_*.json
 # private config (contains API key, do not commit)
 yolo_demo/pinyin/config.py
 *.env
+
+# self-collected data / datasets (large, do not commit)
+yolo_demo/collect/
+yolo_demo/dataset_dark/
+yolo_demo/dataset_dark_v2/
+yolo_demo/dataset_*/

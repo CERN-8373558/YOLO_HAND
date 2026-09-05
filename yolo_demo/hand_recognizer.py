@@ -9,7 +9,7 @@ hand_recognizer.py — 手语识别公共核心模块（高内聚，低耦合）
 
 对外暴露 3 个东西：
     HandRecognizer         类：封装模型加载与识别
-    HandRecognizer.recognize(frame)  → (存在手?, 手部框, 字母, 置信度)
+    HandRecognizer.recognize(frame, topk=1)  → (存在手?, 手部框, 字母, 置信度, topk列表)
     cleanup 后记得 close() 释放资源
 
 这样 camera.py / camera_text.py / predict.py 都 import 它，
@@ -41,14 +41,18 @@ class HandRecognizer:
         self._last_center = None
         self.MOVE_THRESHOLD = MOVE_THRESHOLD
 
-    def recognize(self, frame):
+    def recognize(self, frame, topk=1):
         """对一帧画面识别手语。
+
+        参数:
+            topk: 返回概率最高的前 k 个类别（>=1）
 
         返回 dict：
             detected : bool  是否检测到手
             box      : (x1,y1,x2,y2)  手部框（像素坐标），无手为 None
-            letter   : str   识别出的字母/类别，无手为 None
-            conf     : float 置信度(0~1)，无手为 0
+            letter   : str   识别出的字母/类别(top1)，无手为 None
+            conf     : float top1 置信度(0~1)，无手为 0
+            topk     : list  前 k 个 [{letter, prob}]，降序；无手为 []
         """
         h, w = frame.shape[:2]
 
@@ -59,7 +63,7 @@ class HandRecognizer:
 
         if not result.hand_landmarks:
             return {"detected": False, "box": None, "letter": None, "conf": 0.0,
-                    "moving": False}
+                    "moving": False, "topk": []}
 
         # 2. 算手部框
         box = self._hand_box(result.hand_landmarks[0], w, h)
@@ -84,11 +88,15 @@ class HandRecognizer:
 
         names = results[0].names
         probs = results[0].probs.data.tolist()
-        idx = probs.index(max(probs))
+
+        # top-k：按概率降序取前 k 个
+        k = max(1, int(topk))
+        ranked = sorted(range(len(probs)), key=lambda i: probs[i], reverse=True)[:k]
+        topk_list = [{"letter": names[i], "prob": probs[i]} for i in ranked]
 
         return {"detected": True, "box": box,
-                "letter": names[idx], "conf": probs[idx],
-                "moving": moving}
+                "letter": topk_list[0]["letter"], "conf": topk_list[0]["prob"],
+                "moving": moving, "topk": topk_list}
 
     @staticmethod
     def _hand_box(hand_landmarks, frame_w, frame_h, pad=PADDING):
