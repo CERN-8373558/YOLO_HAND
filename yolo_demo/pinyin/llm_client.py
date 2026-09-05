@@ -215,3 +215,96 @@ def polish_sentence(sentence):
     content = _chat(prompt)
     result = _extract_json_field(content, "sentence") if content else None
     return result if result else text
+
+
+# ============ 英文模式（手语拼英文，EN 系列）============
+
+def _build_prompt_en(letters, context=""):
+    """构造英文拼词 prompt：字母串当作英文单词字母序列（可能识别错）。"""
+    ctx_part = f"context: {context}\n" if context else ""
+    return (
+        "You are a sign-language English helper. The user spells English words "
+        "one letter at a time in ASL; the recognized letter string may contain "
+        "mistakes due to similar hand shapes (e.g. C/B, M/N, E/I confusion).\n"
+        "Infer the most likely English word or short phrase from the letters. "
+        "Even if the string is short, misspelled, or looks like gibberish, "
+        "give your best guess; never return empty. If unsure, pick the most "
+        "common word with similar letters.\n\n"
+        "Examples:\n"
+        'Input "hllo" -> {"candidates": [{"text": "hello", "reason": "letter typo"}]}\n'
+        'Input "wrold" -> {"candidates": [{"text": "world", "reason": "letter swap"}]}\n'
+        'Input "helo" -> {"candidates": [{"text": "hello", "reason": "missing letter"}]}\n\n'
+        f"letters: {letters}\n"
+        f"{ctx_part}"
+        "Return the top 3 candidate English words/phrases as JSON only:\n"
+        '{"candidates": [{"text": "word1", "reason": "short reason"}, ...]}\n'
+        "text must be lowercase English only."
+    )
+
+
+def complete_en(letters, context="", local_cands=None):
+    """英文模式：字母串 → LLM 推断英文单词候选。
+
+    返回: [{"text","score","source","reason"}, ...]；失败返回空列表。
+    英文模式不做本地候选，local_cands 保留参数仅为接口对齐。
+    """
+    if not config.LLM_API_KEY or config.LLM_API_KEY.startswith("sk-REPLACE"):
+        return []
+    prompt = _build_prompt_en(letters, context)
+    payload = {
+        "model": config.LLM_MODEL,
+        "messages": [
+            {"role": "system",
+             "content": "You are a sign-language English helper. Output JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 500,
+    }
+    if config.LLM_THINKING == "disabled":
+        payload["thinking"] = {"type": "disabled"}
+    headers = {
+        "Authorization": f"Bearer {config.LLM_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    url = config.LLM_API_URL.rstrip("/") + "/v1/chat/completions"
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json=payload, headers=headers,
+                                 timeout=config.LLM_TIMEOUT)
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"] or ""
+            parsed = _parse_response(content)
+            if parsed:
+                return parsed
+            if attempt < 2:
+                print(f"[llm-en] 第{attempt+1}次响应为空，重试...")
+        except Exception as e:
+            if attempt == 2:
+                print(f"[llm-en] 调用失败: {e}")
+            else:
+                print(f"[llm-en] 第{attempt+1}次调用异常，重试... {e}")
+    return []
+
+
+def polish_sentence_en(sentence):
+    """把已上屏的英文整句润色成通顺句子（纠错/补标点/调语序）。
+
+    参数: sentence: str，如 "i love chinese food very much"
+    返回: str 润色后英文句，失败返回原句。
+    """
+    text = (sentence or "").strip()
+    if not text:
+        return text
+
+    prompt = (
+        "The user typed an English sentence by signing words one by one; "
+        "it may lack punctuation, contain a misspelled word, or need word-order "
+        "fixes. Polish it into one fluent English sentence with proper "
+        "punctuation and capitalization (first word and proper nouns).\n"
+        f"user input: {text}\n"
+        'Output JSON only: {"sentence": "polished sentence"}'
+    )
+    content = _chat(prompt, system="You are an English proofreader. Output JSON only.")
+    result = _extract_json_field(content, "sentence") if content else None
+    return result if result else text

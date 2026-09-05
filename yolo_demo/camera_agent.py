@@ -96,6 +96,8 @@ def camera_main(args):
     a = Agent()
     # 运行时开关：初始由命令行决定，按 m 切换
     use_llm = args.use_llm
+    # 模式：cn=中文拼音补全 / en=英文(纯字母+LLM)；按 e 切换
+    mode = "cn"
     buffer = TextBuffer()
     pending = []            # 当前拼音串（累积中）
     current_cls = None
@@ -129,10 +131,11 @@ def camera_main(args):
 
         gen: 发起时的请求代数。完成后若与当前代数不一致
              （用户按 Esc 忽略 / 又发了新请求），则丢弃结果。
+        mode: 闭包读取当前模式，en 走英文补全，cn 走中文补全
         """
         from pinyin import llm_client as llm
         llm_status_holder["val"] = "busy"
-        res = llm.complete(letters)
+        res = llm.complete_en(letters) if mode == "en" else llm.complete(letters)
         if llm_gen["n"] != gen:
             return  # 已过期：用户忽略或换了新请求，结果作废
         if res:
@@ -144,9 +147,12 @@ def camera_main(args):
             print(f"[LLM] '{letters}' 无法推断出结果（试试更长/更明确的字母串）")
 
     def request_polish(sentence):
-        """后台整句润色，完成后写入 polished 变量。"""
+        """后台整句润色，完成后写入 polished 变量（按模式走中/英文润色）。"""
         from pinyin import llm_client as llm
-        result = llm.polish_sentence(sentence)
+        if mode == "en":
+            result = llm.polish_sentence_en(sentence)
+        else:
+            result = llm.polish_sentence(sentence)
         polished[0] = result if result else sentence
         polish_done[0] = True
 
@@ -182,27 +188,25 @@ def camera_main(args):
                 letter = r["letter"].lower()
                 if letter in "abcdefghijklmnopqrstuvwxyz":
                     if letter != current_cls:
-                        # 换字母 → 重新开始能量累积
+                        # 换字母 → 重新开始能量累积，且此前的确认锁不再适用（新手势段）
                         current_cls = letter
                         stable_count = 1
                         stable_energy = r["conf"]
-                        # 换字母会解锁：该字母可能后续需要再确认
-                        if confirmed_letter != letter:
-                            confirmed_letter = None
+                        confirmed_letter = None
                     else:
                         stable_count += 1
                         stable_energy += r["conf"]
-                        # 已确认过且未换字母 → 不重复确认（锁）
+                        # 已确认过且本段未结束(进度条未清零) → 不重复确认
+                        # 段结束 = 手放下 / moving / 字母变化，都会把 energy 清零并在此解锁
                         if confirmed_letter != letter:
                             energy_need = args.stable * 0.9
                             if stable_count >= args.stable and stable_energy >= energy_need:
                                 # 字母确认 → 若在补全状态先取消候选
                                 candidates = []
-                                if letter not in "".join(pending[-3:]):  # 防连打重复
-                                    pending.append(letter)
+                                pending.append(letter)   # 防重复交给锁(confirmed_letter)+进度条清零，不在此过滤
                                 pending_text = "".join(pending)
-                                confirmed_letter = letter   # 加锁：同字母不再重复
-                                stable_energy = 0.0
+                                confirmed_letter = letter  # 加锁：同字母、进度条未清零期间不再确认
+                                stable_energy = 0.0        # 进度条归零起点；重新累积需等本段结束
         else:
             # 手放下：重置字母级状态（解锁，允许下次重新确认同字母）
             current_cls = None
@@ -224,6 +228,17 @@ def camera_main(args):
                 letters = "".join(pending)
                 last_pending = letters
                 llm_cands.clear()
+
+                if mode == "en":
+                    # 英文模式：跳过本地猜词，直接请求 LLM 推断英文
+                    if use_llm:
+                        print(f"[EN 触发] 请求 LLM 推断英文: {letters}")
+                        llm_gen["n"] += 1
+                        threading.Thread(target=request_llm,
+                                         args=(letters, llm_gen["n"]), daemon=True).start()
+                    else:
+                        print(f"[EN] LLM 未开启(m 开启)，字母串: {letters}，按 s 手动发送")
+                    continue  # 跳过下方中文本地决策（本轮不再重复处理）
 
                 # 1. 本地决策（不带 llm_hook，本地行先确定）
                 dec = a.decide(letters, llm_hook=None)
@@ -253,20 +268,21 @@ def camera_main(args):
         # ---- 显示 ----
         # 顶部条1：正文 + 闪烁光标（每 0.5s 交替显示/隐藏末尾的 |，同 camera_text.py）
         cv2.rectangle(frame, (0, 0), (frame_w, 40), (40, 40, 40), -1)
+        mode_tag = "[EN]" if mode == "en" else "[CN]"
         body = buffer.text() + "".join(pending)
         elapsed_s = cv2.getTickCount() / cv2.getTickFrequency() - t0
         cursor_visible = int(elapsed_s * 2) % 2 == 0
-        cv2.putText(frame, body + ("|" if cursor_visible else " "), (10, 28),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
-        # 顶部条2：原文回显（最近上屏字母串→中文，防中文上屏后丢失原字母）
+        cv2.putText(frame, mode_tag + " " + body + ("|" if cursor_visible else " "),
+                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2, cv2.LINE_AA)
+        # 顶部条2：原文回显（最近上屏字母串→文本，防上屏后丢失原字母）
         cv2.rectangle(frame, (0, 40), (frame_w, 62), (20, 20, 20), -1)
         hist_str = "  |  ".join(f"{h['letters']} → {h['text']}" for h in hist_log[-3:][::-1])
         if not hist_str:
-            hist_str = "（打完字母后这里显示 nihao → 你好，方便核对原字母）"
+            hist_str = "（打完字母后这里显示 nihao → 你好 / hello → hello）"
         cv2.putText(frame, "原: " + hist_str, (10, 56), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (200, 200, 200), 1, cv2.LINE_AA)
-        # 第三行：本地候选（深蓝底）
-        if candidates:
+        # 第三行：本地候选（深蓝底；英文模式不显示本地候选）
+        if candidates and mode == "cn":
             cv2.rectangle(frame, (0, 64), (frame_w, 100), (20, 20, 60), -1)
             cand_str = "  ".join(f"{i+1}.{c['text']}" for i, c in enumerate(candidates[:5]))
             cv2.putText(frame, cand_str, (10, 92), cv2.FONT_HERSHEY_SIMPLEX,
@@ -287,11 +303,11 @@ def camera_main(args):
             cv2.putText(frame, "LLM 无结果（字母串太模糊），按 s 重发或继续拼", (10, 130),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
 
-        cv2.putText(frame, "q:quit c:clear 1-9:pick S:word T:sent", (frame_w - 300, frame_h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "e:CN/EN q:quit c:clear 1-9:pick S:word T:sent", (frame_w - 340, frame_h - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2, cv2.LINE_AA)
         # 左上角显示大模型开关状态
         llm_color = (0, 255, 0) if use_llm else (150, 150, 150)
-        llm_text = f"LLM: {'ON' if use_llm else 'OFF'} (m)"
+        llm_text = f"LLM: {'ON' if use_llm else 'OFF'} (m)  模式: {'EN' if mode=='en' else 'CN'} (e)"
         cv2.putText(frame, llm_text, (10, frame_h - 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, llm_color, 2, cv2.LINE_AA)
         if r["detected"]:
@@ -320,6 +336,14 @@ def camera_main(args):
         elif key == ord("m"):  # 运行时切换大模型
             use_llm = not use_llm
             print(f"[大模型增强] {'开' if use_llm else '关'}")
+        elif key == ord("e"):  # 运行时切换 CN/EN 模式
+            mode = "en" if mode == "cn" else "cn"
+            # 切模式：清掉本地候选与在途 LLM 结果，避免跨模式误选
+            llm_gen["n"] += 1
+            candidates = []
+            llm_cands.clear()
+            llm_status_holder["val"] = ""
+            print(f"[模式] 切换到 {'EN 英文' if mode=='en' else 'CN 中文拼音'}")
         elif key == ord("c"):
             buffer = TextBuffer()
             pending, candidates, llm_cands = [], [], []
